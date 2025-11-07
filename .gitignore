@@ -48,6 +48,7 @@ results/
 *.bam
 *.bai
 *.vcf
+*.tbi
 *.bed
 *.gff
 *.gtf
