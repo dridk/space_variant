@@ -1,13 +1,13 @@
 import polars as pl
 import gzip
 import pysam
-
-filename = (
-    "../../dataset/pancreas/Visium_HD_3prime_Human_Pancreatic_Cancer_fastqs/variants.mutect.vcf.gz"
-)
+from tqdm import tqdm
 
 
 def read_vcf(filename):
+    """
+    Lecture d'un fichier VCF en polars
+    """
 
     def xopen(filename):
         if filename.endswith(".gz"):
@@ -28,14 +28,14 @@ def read_vcf(filename):
 
     header = header.decode().strip().split("\t")
     sample = header[-1]
-    columns = ["CHROM", "POS", "REF", "ALT"]
+    columns = ["CHROM", "POS", "REF", "ALT", "INFO"]
     header_count -= 1
     df = (
         pl.scan_csv(
             filename,
             skip_rows=header_count,  # Je saute les 40 premieres lignes de commentaires
             separator="\t",  # Séparateur TSV
-            dtypes={"#CHROM": pl.Utf8},
+            schema_overrides={"#CHROM": pl.Utf8},
             with_column_names=lambda cols: [c.replace("#", "") for c in cols],
         )
         .select(
@@ -53,17 +53,28 @@ def read_vcf(filename):
     )
 
     df.columns = [i.lower() for i in df.columns]
+
+    df = df.with_columns(pl.col("af").cast(pl.Float32()), pl.col("dp").cast(pl.UInt32()))
+
     return df
 
 
 def read_spatial_variant(bam_file, vcf_file):
+    """
+    Lecture des spatial variants
 
-    bam_file = "../../dataset/pancreas/my_output/outs/possorted_genome_bam.bam"
+    """
+    # bam_file = "../../dataset/pancreas/my_output/outs/possorted_genome_bam.bam"
+    # vcf_file = "./pancreas.vcf.gz"
+    # vcf_file = "../../dataset/pancreas/Visium_HD_3prime_Human_Pancreatic_Cancer_fastqs/variants.mutect.ann.dbsnp.vcf"
+    vdf = read_vcf(vcf_file).filter(pl.col("af").is_between(0.1, 1)).filter(pl.col("dp") > 20)
 
-    vdf = read_vcf(vcf_file)
+    vdf = vdf.filter(pl.col("chrom").str.contains("^chr[\dXY]$"))
+
+    vdf.write_csv("pancreas.csv", separator="\t")
     bam = pysam.AlignmentFile(bam_file)
 
-    for row in vdf.rows(named=True):
+    for row in tqdm(vdf.rows(named=True), total=len(vdf)):
 
         chrom = row["chrom"]
         pos = row["pos"]
@@ -75,6 +86,8 @@ def read_spatial_variant(bam_file, vcf_file):
         ad = row["ad"]
         dp = row["dp"]
         af = row["af"]
+
+        info = row["info"]
 
         for colpil in bam.pileup(chrom, start, end, truncate=True):
 
@@ -115,10 +128,7 @@ def read_spatial_variant(bam_file, vcf_file):
 
 
 bam_file = "../../dataset/pancreas/my_output/outs/possorted_genome_bam.bam"
-vcf_file = (
-    "../../dataset/pancreas/Visium_HD_3prime_Human_Pancreatic_Cancer_fastqs/variants.mutect.vcf.gz"
-)
+vcf_file = "../../dataset/pancreas/Visium_HD_3prime_Human_Pancreatic_Cancer_fastqs/pancreas.mutect.ann.dbsnp.norm.vcf.gz"
 
-for rec in read_spatial_variant(bam_file=bam_file, vcf_file=vcf_file):
-
-    print(rec)
+df = pl.DataFrame(read_spatial_variant(bam_file=bam_file, vcf_file=vcf_file))
+df.write_parquet("spatial_variants2.parquet")
