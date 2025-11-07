@@ -1,0 +1,72 @@
+    
+rule read_group:
+  input:
+    "{sample}.bam"
+  output:
+    "{sample}.rg.bam"
+  threads: 20
+  shell:
+    "samtools addreplacerg -@{threads} -r '@RG\tID:1\tSM:{wildcards.sample}\tPL:ILLUMINA\tLB:lib1\tPU:unit1' -o {output} {input}"
+
+rule index:
+  input:
+    "{filename}.bam"
+  output:
+    "{filename}.bam.bai"
+  threads: 20
+  shell:
+    "samtools index -@{threads} {input}"
+
+rule calling:
+  input:
+    bam = "{sample}.rg.bam",
+    index = "{sample}.rg.bam.bai"
+    
+  output:
+    "{sample}.mutect.vcf.gz"
+    
+  log:
+    "{sample}.mutect.log"
+  
+  shell:
+    # "gatk Mutect2 -R {config[reference]} -I {input.bam} -O  {output} 2> {log}"
+    "touch {output}"
+
+rule multi_allele:
+  input:
+    "{sample}.mutect.vcf.gz"
+  output:
+    "{sample}.mutect.unique.vcf.gz"
+  threads: 20
+  shell:
+    "bcftools norm --threads {threads} -m -any -f {config[reference]}  {input} -o {output} -O z "    
+    
+rule ann_dbsnp:
+  input:
+    "{sample}.mutect.unique.vcf.gz"
+  output:
+    "{sample}.mutect.unique.dbsnp.vcf.gz"
+  shell:
+    """
+    SnpSift annotate {config[dbsnp]} {input}|bgzip > {output}
+    """
+
+rule annotation:
+  input:
+    "{sample}.mutect.unique.dbsnp.vcf.gz"
+  output:
+    "{sample}.mutect.unique.dbsnp.ann.vcf.gz"
+  log:
+    "{sample}.snpeff.log"
+  shell:
+    "snpEff -Xms50G -v {config[snpeff]} {input} 2> {log} |bgzip > {output} "
+    
+rule spatial_variant:
+  input:
+    bam ="{sample}.rg.bam",
+    vcf= "{sample}.mutect.unique.dbsnp.ann.vcf.gz"
+  output:
+    "{sample}.spatial_variant.parquet"
+  shell:
+    "python {workflow.basedir}/scripts/create_space_variant.py {input.bam} {input.vcf} {output}" 
+  
