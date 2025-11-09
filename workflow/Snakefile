@@ -1,4 +1,5 @@
     
+
 rule read_group:
   input:
     "{sample}.bam"
@@ -13,39 +14,57 @@ rule index:
     "{filename}.bam"
   output:
     "{filename}.bam.bai"
-  threads: 20
   shell:
-    "samtools index -@{threads} {input}"
+    "samtools index {input}"
 
-rule calling:
+
+
+rule freebayes:
+    input:
+      bam="{sample}.rg.{chr}.bam",
+      bai="{sample}.rg.{chr}.bam.bai"
+    output:
+      "{sample}.rg.{chr}.freebayes.vcf.gz"
+    shell:
+      "freebayes -f {config[reference]} --min-coverage {config[min_dp]} --min-alternate-count {config[min_ao]} {input.bam} |bgzip > {output} "
+      
+rule bam_chromosome:
   input:
-    bam = "{sample}.rg.bam",
-    index = "{sample}.rg.bam.bai"
-    
+    "{sample}.rg.bam"
   output:
-    "{sample}.mutect.vcf.gz"
-    
-  log:
-    "{sample}.mutect.log"
-  
+    "{sample}.rg.{chr}.bam"
+
   shell:
-    # "gatk Mutect2 -R {config[reference]} -I {input.bam} -O  {output} 2> {log}"
-    "touch {output}"
+    """
+    samtools view -OBam {input} {wildcards.chr} > {output}
+    """
+
+
+
+rule merge_vcf:
+  input:
+    expand("{sample}.rg.{chr}.freebayes.vcf.gz", chr= [f"chr{i}" for i in range(1,22)], allow_missing=True)
+
+  output:
+    "{sample}.freebayes.all.vcf.gz"
+
+  shell:
+    "bcftools merge -Oz {input} -o {output}"
 
 rule multi_allele:
   input:
-    "{sample}.mutect.vcf.gz"
+    "{sample}.freebayes.all.vcf.gz"
   output:
-    "{sample}.mutect.unique.vcf.gz"
+    "{sample}.freebayes.all.unique.vcf.gz"
   threads: 20
   shell:
     "bcftools norm --threads {threads} -m -any -f {config[reference]}  {input} -o {output} -O z "    
     
 rule ann_dbsnp:
   input:
-    "{sample}.mutect.unique.vcf.gz"
+    "{sample}.freebayes.all.unique.vcf.gz"
   output:
-    "{sample}.mutect.unique.dbsnp.vcf.gz"
+    "{sample}.freebayes.all.unique.dbsnp.vcf.gz"
   shell:
     """
     SnpSift annotate {config[dbsnp]} {input}|bgzip > {output}
@@ -53,9 +72,9 @@ rule ann_dbsnp:
 
 rule annotation:
   input:
-    "{sample}.mutect.unique.dbsnp.vcf.gz"
+    "{sample}.freebayes.all.unique.dbsnp.vcf.gz"
   output:
-    "{sample}.mutect.unique.dbsnp.ann.vcf.gz"
+    "{sample}.freebayes.all.unique.dbsnp.ann.vcf.gz"
   log:
     "{sample}.snpeff.log"
   shell:
@@ -64,7 +83,7 @@ rule annotation:
 rule spatial_variant:
   input:
     bam ="{sample}.rg.bam",
-    vcf= "{sample}.mutect.unique.dbsnp.ann.vcf.gz"
+    vcf= "{sample}.freebayes.all.unique.dbsnp.ann.vcf.gz"
   output:
     "{sample}.spatial_variant.parquet"
   shell:
