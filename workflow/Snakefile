@@ -17,7 +17,13 @@ rule index:
   shell:
     "samtools index {input}"
 
-
+rule vcf_index:
+    input:
+      "{filename}.vcf.gz"
+    output:
+      "{filename}.vcf.gz.tbi"
+    shell:
+      "tabix -p vcf {input}"
 
 rule freebayes:
     input:
@@ -43,13 +49,13 @@ rule bam_chromosome:
 
 rule merge_vcf:
   input:
-    expand("{sample}.rg.{chr}.freebayes.vcf.gz", chr= [f"chr{i}" for i in range(1,22)], allow_missing=True)
+    expand("{sample}.rg.{chr}.freebayes.vcf.gz", chr= [f"chr{i}" for i in range(1,22)], allow_missing=True),
+    expand("{sample}.rg.{chr}.freebayes.vcf.gz.tbi", chr= [f"chr{i}" for i in range(1,22)], allow_missing=True)
 
   output:
     "{sample}.freebayes.all.vcf.gz"
-
   shell:
-    "bcftools merge -Oz {input} -o {output}"
+    "bcftools concat -a -Oz {input}  > {output}"
 
 rule multi_allele:
   input:
