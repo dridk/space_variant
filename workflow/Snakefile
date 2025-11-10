@@ -49,13 +49,13 @@ rule bam_chromosome:
 
 rule merge_vcf:
   input:
-    expand("{sample}.rg.{chr}.freebayes.vcf.gz", chr= [f"chr{i}" for i in range(1,22)], allow_missing=True),
-    expand("{sample}.rg.{chr}.freebayes.vcf.gz.tbi", chr= [f"chr{i}" for i in range(1,22)], allow_missing=True)
+    bam=expand("{sample}.rg.{chr}.freebayes.vcf.gz", chr= [f"chr{i}" for i in range(1,22)], allow_missing=True),
+    bai=expand("{sample}.rg.{chr}.freebayes.vcf.gz.tbi", chr= [f"chr{i}" for i in range(1,22)], allow_missing=True)
 
   output:
     "{sample}.freebayes.all.vcf.gz"
   shell:
-    "bcftools concat -a -Oz {input}  > {output}"
+    "bcftools concat -a -Oz {input.bam}  > {output}"
 
 rule multi_allele:
   input:

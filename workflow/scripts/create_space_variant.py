@@ -42,11 +42,11 @@ def read_vcf(filename):
             columns
             + [  # Je sélectionne les colonnes souhaitées
                 pl.col("FORMAT").str.split(":"),
-                pl.col("Boby").str.split(":"),
+                pl.col(sample).str.split(":"),
             ]
         )
-        .explode(["FORMAT", "Boby"])
-        .filter(pl.col("FORMAT").is_in(["GT", "AD", "AF", "DP"]))
+        .explode(["FORMAT", sample])
+        .filter(pl.col("FORMAT").is_in(["GT", "AD", "AO", "DP", "RO"]))
         .collect()
         .pivot(on="FORMAT", index=columns, values=[sample])
         .with_columns(pl.lit(sample).alias("SAMPLE"))
@@ -55,10 +55,11 @@ def read_vcf(filename):
     df.columns = [i.lower() for i in df.columns]
 
     df = df.with_columns(
-        pl.col("af").cast(pl.Float32()),
+        pl.col("ao").cast(pl.UInt32()),
         pl.col("dp").cast(pl.UInt32()),
+        pl.col("ad").str.split(","),
         pl.col("id").str.replace(".", None),
-    )
+    ).with_columns((pl.col("ao")/pl.col("dp")).round(2).alias("af"))
 
     return df
 
@@ -70,29 +71,26 @@ def read_spatial_variant(
     Lecture des spatial variants
 
     """
-    vdf = (
-        read_vcf(vcf_file)
-        .filter(pl.col("af").is_between(min_af, 1))
-        .filter(pl.col("dp") > min_dp)
-    )
+    vdf =  read_vcf(vcf_file)
 
+    vdf = vdf.filter(pl.col("dp") >= min_dp).filter(pl.col("af") >= min_af)
     vdf = vdf.filter(pl.col("chrom").str.contains(r"^chr[\dXY]$"))
+    vdf = vdf.with_columns((pl.col("pos")-1).alias("start"),
+                           (pl.col("pos")).alias("end"))
+    
 
-    vdf.write_csv("pancreas.csv", separator="\t")
+    # vdf = vdf.filter(pl.col("id").str.starts_with("rs"))
+    
     bam = pysam.AlignmentFile(bam_file)
 
     for row in tqdm(vdf.rows(named=True), total=len(vdf)):
-        chrom = row["chrom"]
-        pos = row["pos"]
-        start = row["pos"] - 1
-        end = row["pos"]
+
+        info = row["info"]
+        chrom  = row["chrom"]
+        start = row["start"]
+        end = row["end"]
         ref = row["ref"]
         alt = row["alt"]
-        gt = row["gt"]
-        ad = row["ad"]
-        dp = row["dp"]
-        af = row["af"]
-        info = row["info"]
 
         for colpil in bam.pileup(chrom, start, end, truncate=True):
             for read in colpil.pileups:
@@ -113,23 +111,45 @@ def read_spatial_variant(
 
                         umi = read.alignment.get_tag("UB")
 
-                        yield {
-                            "rsid": id,
-                            "chrom": chrom,
-                            "pos": pos,
-                            "ref": ref,
-                            "alt": alt,
-                            "dp": dp,
-                            "ad": ad,
-                            "af": af,
-                            "gt": gt,
-                            "info": info,
-                            "base": base,
-                            "barcode": barcode,
-                            "x": x,
-                            "y": y,
-                            "umi": umi,
-                        }
+                        # split annotation
+                        ann = []
+                        ann_keys = ["allele", "effect", "impact", "gene", "gene_id", "feature_type", "feature_id", "biotype", "rank", "hgvs_c", "hgvs_p", "dna", "cds","protein", "distance", "_"]
+                        for i in info.split(";"):
+                            if i.startswith("ANN="):
+                                ann = i.split("=")[1].split("|")
+                                ann = dict(zip( ann_keys, ann))
+                                break
+
+
+                        item = {}
+                        item["chr"] = chrom
+                        item["start"] = start
+                        item["end"] = end
+                        item["pos"] = row["pos"]
+                        item["ref"] = row["ref"]
+                        item["alt"] = row["alt"]
+                        item["rsid"] = row["id"]
+                        item["gt"] = row["gt"]
+                        item["ad"] = row["ad"]
+                        item["dp"] = row["dp"]
+                        item["ao"] = row["ao"]
+                        item["ro"] = row["ro"]
+                        item["af"] = row["af"]
+                        item["gene"] = ann["gene"]
+                        item["effect"] = ann["effect"]
+                        item["feature_type"] = ann["feature_type"]
+                        item["biotype"] = ann["biotype"]
+                        item["hgvs_c"] = ann["hgvs_c"]
+                        item["hgvs_p"] = ann["hgvs_p"]
+                                                
+                        item["base"] = base
+                        item["barcode"] = barcode
+                        item["x"] = x
+                        item["y"] = y
+                        item["umi"] = umi
+                        
+                        yield item
+                        
 
 
 if __name__ == "__main__":
@@ -161,4 +181,6 @@ if __name__ == "__main__":
             min_af=args.min_af,
         )
     )
+
+
     df.write_parquet(args.output_file)
