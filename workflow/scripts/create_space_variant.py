@@ -59,39 +59,39 @@ def read_vcf(filename):
         pl.col("dp").cast(pl.UInt32()),
         pl.col("ad").str.split(","),
         pl.col("id").str.replace(".", None),
-    ).with_columns((pl.col("ao")/pl.col("dp")).round(2).alias("af"))
+    ).with_columns((pl.col("ao") / pl.col("dp")).round(2).alias("af"))
 
     return df
 
 
 def read_spatial_variant(
-    bam_file: str, vcf_file: str, min_dp: int = 20, min_af: float = 0.1
+    bam_file: str, vcf_file: str, min_dp: int = 0, min_af: float = 0.0
 ):
     """
     Lecture des spatial variants
 
     """
-    vdf =  read_vcf(vcf_file)
+    vdf = read_vcf(vcf_file)
 
     vdf = vdf.filter(pl.col("dp") >= min_dp).filter(pl.col("af") >= min_af)
-    vdf = vdf.filter(pl.col("chrom").str.contains(r"^chr[\dXY]$"))
-    vdf = vdf.with_columns((pl.col("pos")-1).alias("start"),
-                           (pl.col("pos")).alias("end"))
-    
+    vdf = vdf.filter(pl.col("chrom").str.contains(r"^chr[\dXY]+$"))
+    vdf = vdf.with_columns(
+        (pl.col("pos") - 1).alias("start"), (pl.col("pos")).alias("end")
+    )
 
     # vdf = vdf.filter(pl.col("id").str.starts_with("rs"))
-    
+
     bam = pysam.AlignmentFile(bam_file)
 
-    for row in tqdm(vdf.rows(named=True), total=len(vdf)):
-
+    for index, row in enumerate(tqdm(vdf.rows(named=True), total=len(vdf))):
         info = row["info"]
-        chrom  = row["chrom"]
+        chrom = row["chrom"]
         start = row["start"]
         end = row["end"]
         ref = row["ref"]
-        alt = row["alt"]
 
+        # if index > 50:
+        #     break
         for colpil in bam.pileup(chrom, start, end, truncate=True):
             for read in colpil.pileups:
                 if (
@@ -113,13 +113,29 @@ def read_spatial_variant(
 
                         # split annotation
                         ann = []
-                        ann_keys = ["allele", "effect", "impact", "gene", "gene_id", "feature_type", "feature_id", "biotype", "rank", "hgvs_c", "hgvs_p", "dna", "cds","protein", "distance", "_"]
+                        ann_keys = [
+                            "allele",
+                            "effect",
+                            "impact",
+                            "gene",
+                            "gene_id",
+                            "feature_type",
+                            "feature_id",
+                            "biotype",
+                            "rank",
+                            "hgvs_c",
+                            "hgvs_p",
+                            "dna",
+                            "cds",
+                            "protein",
+                            "distance",
+                            "_",
+                        ]
                         for i in info.split(";"):
                             if i.startswith("ANN="):
                                 ann = i.split("=")[1].split("|")
-                                ann = dict(zip( ann_keys, ann))
+                                ann = dict(zip(ann_keys, ann))
                                 break
-
 
                         item = {}
                         item["chr"] = chrom
@@ -138,18 +154,18 @@ def read_spatial_variant(
                         item["gene"] = ann["gene"]
                         item["effect"] = ann["effect"]
                         item["feature_type"] = ann["feature_type"]
+                        item["impact"] = ann["impact"]
                         item["biotype"] = ann["biotype"]
                         item["hgvs_c"] = ann["hgvs_c"]
                         item["hgvs_p"] = ann["hgvs_p"]
-                                                
+
                         item["base"] = base
                         item["barcode"] = barcode
                         item["x"] = x
                         item["y"] = y
                         item["umi"] = umi
-                        
+
                         yield item
-                        
 
 
 if __name__ == "__main__":
@@ -182,5 +198,6 @@ if __name__ == "__main__":
         )
     )
 
-
+    print(df)
     df.write_parquet(args.output_file)
+
