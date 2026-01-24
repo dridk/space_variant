@@ -19,7 +19,91 @@ def _():
     import hvplot.polars 
     import marimo as mo
     import numpy as np 
-    return Image, alt, mo, mpimg, np, patches, pl, plt, sns, xr
+    import pysam
+    import holoviews as hv
+    import panel as pn
+    return Image, alt, hv, mo, mpimg, np, patches, pl, plt, pn, pysam, sns, xr
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Function helper
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(pysam):
+    fasta = pysam.FastaFile("/Linux_data/recherche/hg38/hg38.fa")
+    complement = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G'}
+
+    def get_base(chrom:str, position:int) -> str:
+        trinuc = fasta.fetch(chrom,position-2, position+1)
+
+        if trinuc[1] not in ("A","C"):
+            trinuc = "".join([complement[i] for i in trinuc])
+
+
+        return  trinuc.upper()
+
+
+    get_base("chr1", 23424)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Calcul du nombre de reads par bins
+    """)
+    return
+
+
+@app.cell
+def _(pl):
+    pl.scan_parquet("reads/*.parquet").head(10).collect()
+    return
+
+
+@app.cell(hide_code=True)
+def _(pl):
+    umi_df = (
+        pl.scan_parquet("reads/*.parquet")
+        .select(["barcode", "umi", pl.col("x").cast(pl.Int32()), pl.col("y").cast(pl.Int32())])
+        .collect()
+    )
+    umi_df = umi_df.group_by("barcode").agg(
+        pl.col("umi").is_duplicated().sum() / pl.col("umi").count(), pl.col("x").first(), pl.col("y").first()
+    )
+    return
+
+
+@app.cell
+def _(pl):
+    #group_read_df  = pl.scan_parquet("reads/*.parquet").select(["barcode","umi"]).group_by(["barcode"]).agg(pl.col("umi").unique().len().alias("len")).collect()
+
+    group_read_df  = pl.scan_parquet("reads/*.parquet").select(["barcode"]).group_by(["barcode"]).agg(pl.len()).collect()
+
+
+
+    group_read_df = group_read_df.with_columns(pl.col("barcode").str.split("_").list.get(2).alias("x").cast(pl.Int16),
+                         pl.col("barcode").str.split("_").list.get(3).alias("y").str.replace("-1", "").cast(pl.Int16)
+                        )
+
+    group_read_df
+    return (group_read_df,)
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _(group_read_df, np):
+    group_read_df.hvplot.hexbin(x="x", y="y", C="len", aspect=1, gridsize=100, reduce_function=np.sum, cmap="viridis")
+    return
 
 
 @app.cell
@@ -91,8 +175,197 @@ def _(cosmic_df, pl):
     )
 
 
+    df = df.unique()
+
+    # Add is_snp 
+
+    df  = df.with_columns(((pl.col("ref").str.len_chars() ==1) & (pl.col("alt").str.len_chars() ==1)).alias("is_snp"))
+
     df
     return df, pos_df
+
+
+@app.cell
+def _(df, pl):
+    mapping = {"A": "T", "T": "A", "G": "C", "C": "G"}
+    sign_df = df.filter(pl.col("is_snp")).filter(~pl.col("rsid").str.contains("rs"))
+
+
+    sign_df = sign_df.with_columns(
+        [
+            (pl.when(pl.col("ref").is_in(["C", "T"]))
+            .then(pl.col(i))
+            .otherwise(pl.col(i).replace(mapping))
+            ).alias(f"{i}2")
+            for i in ("ref", "alt")
+        ]
+    ).with_columns(
+        pl.format("{} > {}", pl.col("ref2"), pl.col("alt2")).alias("signature")
+    )
+
+    sign_df.select(["ref","alt","signature"])
+
+    sign_df_group = (
+        sign_df.group_by("barcode")
+        .agg(pl.col("signature").value_counts())
+        .explode("signature")
+        .with_columns(pl.col("signature").struct.unnest())
+    ).join(sign_df, on="barcode",).select("barcode","x", "y", "signature", "count").unique()
+
+    sign_df_group
+
+    # pl.col("signature"), pl.col("len").first().alias("read_count"), pl.col("x").first(), pl.col("y").first())
+    # sign_df = sign_df.with_columns((pl.col("variant_count") / pl.col("read_count")).alias("vpercent") * 100)
+    #sign_df.unique()
+    return sign_df, sign_df_group
+
+
+@app.cell
+def _(mo, sign_df_group):
+    sign_ui = mo.ui.dropdown(options=sign_df_group["signature"].unique(), label="Signature")
+    size_ui = mo.ui.slider(start=10, stop=200, value=10, label="resolution")
+
+    mo.vstack([
+        sign_ui, 
+        size_ui
+    ]
+    )
+    return
+
+
+@app.cell
+def _(hv, np, pl, pn, sign_df_group):
+    sign_widget = pn.widgets.Select(
+        name="Signature",
+        options=list(sign_df_group["signature"].unique()),
+        width=200,
+    )
+
+
+    res_widget = pn.widgets.IntSlider(
+        name="resolution",
+        start=10, 
+        end=200,
+        value=10
+    )
+
+    range_stream = hv.streams.RangeXY(x_range=None, y_range=None)
+
+
+    def plot_signature(signature, res = 10,  x_range=None, y_range=None ):
+        plot = sign_df_group.filter(
+            pl.col("signature") == signature
+        ).hvplot.hexbin(
+            x="x",
+            y="y",
+            C="count",
+            gridsize=res,
+            aspect="equal",
+            reduce_function=np.sum,
+            frame_width=600,
+            hover_cols=["barcode"],
+            framewise=False,
+            xlim=x_range,
+            ylim=y_range,
+        )
+
+        # lot = plot.opts(xlim=10, ylim=10)
+
+        return plot
+
+
+    plot = hv.DynamicMap(
+        pn.bind(
+            plot_signature,
+            signature=sign_widget,
+            res = res_widget,
+            x_range=range_stream.param.x_range,
+            y_range=range_stream.param.y_range     
+        )
+    )
+
+
+    pn.Column(pn.Row(sign_widget, res_widget), plot)
+
+
+    # sign_df_group.filter(pl.col("signature") == sign_ui.value).hvplot.scatter(x="x", y="y", marker="square", hover_cols=["barcode"], c="count",aspect="equal", frame_width=600)
+    return
+
+
+@app.cell
+def _(pl, sign_df):
+    sign_df.filter(pl.col("barcode").str.contains("01554_02722"))
+    return
+
+
+@app.cell
+def _(df, pl):
+    df.filter(pl.col("barcode").str.contains("s_002um_01554_02722-1")).filter(pl.col("rsid") == ".")["gene"].value_counts()
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Calcul des signature mutationnel
+    """)
+    return
+
+
+@app.cell
+def _(group_read_df):
+    group_read_df.head()
+    return
+
+
+@app.cell
+def _(df, group_read_df, pl):
+    vcon_df = (
+        group_read_df.join(df, on="barcode")
+        .group_by("barcode")
+        .agg(
+            pl.col("id").unique().len().alias("variant_count"),
+            pl.col("len").first().alias("umi_count"),
+            pl.col("x").first(),
+            pl.col("y").first(),
+        )
+    )
+    vcon_df = vcon_df.with_columns(
+        (pl.col("variant_count") / pl.col("umi_count")).alias("vpercent") * 100
+    )
+    vcon_df
+    return (vcon_df,)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    # Afficher la concentration en variants
+    """)
+    return
+
+
+@app.cell
+def _(np, vcon_df):
+    vcon_df.hvplot.hexbin(x="x", y="y", C='vpercent', gridsize=200, data_aspect=1, frame_width=600, reduce_function=np.sum)
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _(df, pl):
+    df.filter(pl.col("pos") == 101256440).unique()
+    return
+
+
+@app.cell
+def _(df, pl):
+    df[["barcode","chr","pos","ref","alt","dp", "ao", "ro","af", "gene","x","y", "rsid", "cosmic"]].filter(pl.col("ref").str.len_chars() == 1)
+    return
 
 
 @app.cell
@@ -106,14 +379,15 @@ def _(df, pl):
 def _(df, somatic_df):
     all_count = len(df["id"].unique())
     somatic_count = len(somatic_df["id"].unique())
-    cosmic_count = len(somatic_df["cosmic"].unique().is_not_null())
-
+    cosmic_count = len(df["cosmic"].unique().is_not_null())
     return all_count, cosmic_count, somatic_count
 
 
 @app.cell
-def _(cosmic_df):
-    del cosmic_df
+def _(mo):
+    mo.md(r"""
+    ## Statistique generales
+    """)
     return
 
 
@@ -138,7 +412,7 @@ def _(alt, df):
 
 
 @app.cell
-def _(df, pl, q, sns, somatic_df):
+def _(df, pl, sns, somatic_df):
     dist_a = (
         df.filter(pl.col("dp") > 40)
         .filter(pl.col("biotype") == "protein_coding")
@@ -156,7 +430,7 @@ def _(df, pl, q, sns, somatic_df):
         .select(["id", "af"])
         .unique().with_columns(pl.lit("dbsnp").alias("filtered"))
     )
-    q
+
     dist = pl.concat([dist_a, dist_b])
 
     g = sns.displot(dist, x="af", col="filtered", kde=True, bins = 90)
@@ -164,12 +438,62 @@ def _(df, pl, q, sns, somatic_df):
     for ax in g.axes.flat:
         for line in ax.lines:
             line.set_color("red")
+
     g
     return
 
 
 @app.cell
-def _():
+def _(df, pl, sns):
+    sns.displot(df.filter(pl.col("dp") < 10000)["dp"].to_pandas())
+    return
+
+
+@app.cell
+def _(df, pl):
+    df.filter(pl.col("dp") > 50000)["gene", "dp"].unique().group_by("gene").agg(pl.col("dp").first()).sort("dp",descending=True)
+    return
+
+
+@app.cell
+def _(pl, somatic_df):
+    somatic_df.filter(pl.col("af") < 0.3).group_by("gene").agg(pl.count("id")).sort("id", descending=True)
+    return
+
+
+app._unparsable_cell(
+    r"""
+    # AGR !!!! 
+
+    but in human cancer cell lines high levels of AGR2 correlate with downregulation of the p53 response,[
+    """,
+    name="_"
+)
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Variants Comsic
+    """)
+    return
+
+
+@app.cell
+def _(plt):
+    from wordcloud import WordCloud
+    def plot_words(items: list):
+        sentences = " ".join(items)
+        plt.imshow(WordCloud().generate(sentences))
+        plt.show()
+    return (plot_words,)
+
+
+@app.cell
+def _(df, pl, plot_words):
+    cgenes = df.filter(pl.col("cosmic").is_not_null())["id", "gene"].unique()["gene"].value_counts().sort("count", descending=True).head(100)["gene"].to_list()
+
+    plot_words(cgenes)
     return
 
 
@@ -206,25 +530,42 @@ def _(Image, np, xr):
     d = xr.DataArray(arr, coords=coords, dims=("screen_y","screen_x","channel"), name="image2")
 
     #d.hvplot.image(x="x",  y="y")
-
     return (d,)
 
 
 @app.cell
-def _(d, somatic_df):
+def _():
+    return
+
+
+@app.cell
+def _(d, df):
     w = 500
     h = 500
     image_plot = d.hvplot.rgb(bands="channel", x="screen_x", y="screen_y", aspect="equal", rasterize=True, width=w, height=h)
     image_plot
 
 
-    space_df = somatic_df.select(["id", "screen_x", "screen_y","x","y", "af", "dp"])
-    variant_plot = space_df.hvplot.scatter(x="screen_x", y="screen_y",rasterize=True, aspect='equal', aggregator="count", datashade=True,width=w, height=h)
-
+    space_df = df.select(["id", "screen_x", "screen_y","x","y", "af", "dp","gene"])
+    variant_plot = space_df.hvplot.scatter(x="screen_x", y="screen_y",rasterize=False, aspect='equal',aggregator="count", datashade=True,width=w, height=h)
+    #variant_plot = space_df.head(100000).hvplot.scatter(x="screen_x", y="screen_y", aspect='equal',width=w, height=h)
     overlay = image_plot + variant_plot
     overlay = overlay.opts( shared_axes=True)
     overlay
-    return (space_df,)
+    return h, space_df, w
+
+
+@app.cell
+def _(h, space_df, w):
+    space_df.head(100000).hvplot.scatter(x="screen_x", y="screen_y", width=w, height=h)
+    return
+
+
+@app.cell
+def _(h, space_df, w):
+    variant_plot2 = space_df.sample(100000).hvplot.scatter(x="x", y="y",width=w, height=h)
+    variant_plot2
+    return
 
 
 @app.cell
@@ -248,7 +589,6 @@ def _(pl, space_df):
 
     down_df = down_df.to_pandas().set_index("space_id")
     down_df
-
     return (down_df,)
 
 
@@ -307,11 +647,6 @@ def _(fdf, pl, sns):
 @app.cell
 def _(fdf):
     fdf
-    return
-
-
-@app.cell
-def _():
     return
 
 
