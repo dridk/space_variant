@@ -1,9 +1,13 @@
 
 
+CHROMS = [f"chr{i}" for i in list(range(1,23)) + ["X", "Y"]]
+
 rule root:
   input:
-    expand("pancreas.{chr}.spatial_variant.parquet", chr= [f"chr{i}" for i in range(1,22)])
-     
+    expand("pancreas.{chr}.spatial_variant.parquet", chr=CHROMS),
+    "pancreas.somatic.parquet",
+    "pancreas.gyration.parquet"
+
 
 rule read_group:
   input:
@@ -54,8 +58,8 @@ rule bam_chromosome:
 
 # rule merge_vcf:
 #   input:
-#     bam=expand("{sample}.rg.{chr}.freebayes.vcf.gz", chr= [f"chr{i}" for i in range(1,22)], allow_missing=True),
-#     bai=expand("{sample}.rg.{chr}.freebayes.vcf.gz.tbi", chr= [f"chr{i}" for i in range(1,22)], allow_missing=True)
+#     bam=expand("{sample}.rg.{chr}.freebayes.vcf.gz", chr= [f"chr{i}" for i in list(range(1,23)) + ["X", "Y"]], allow_missing=True),
+#     bai=expand("{sample}.rg.{chr}.freebayes.vcf.gz.tbi", chr= [f"chr{i}" for i in list(range(1,23)) + ["X", "Y"]], allow_missing=True)
 
 #   output:
 #     "{sample}.freebayes.all.vcf.gz"
@@ -103,3 +107,14 @@ rule spatial_variant:
   shell:
     "python {workflow.basedir}/scripts/create_space_variant.py {input.bam} {input.vcf} {output}" 
   
+
+rule post_process:
+  input:
+    expand("{sample}.{chr}.spatial_variant.parquet", chr=CHROMS, allow_missing=True)
+  output:
+    somatic="{sample}.somatic.parquet",
+    score="{sample}.gyration.parquet"
+  log:
+    "{sample}.post_process.log"
+  shell:
+    "python {workflow.basedir}/scripts/post_process.py {input} --somatic {output.somatic} --score {output.score} --min-depth {config[somatic_min_dp]} > {log}"

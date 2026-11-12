@@ -4,12 +4,15 @@ Snakemake pipeline that calls variants from **Visium HD 3' (polyA)** spatial
 transcriptomics alignments.   
 The output is a set of Parquet tables (one per chromosome) in which each row is
 a variant called with its annotation and its position on the slide.
+A post-processing step then keeps the somatic-like variants and computes a
+spatial-clustering score for each of them.
 
 
 1. [Download the pancreas dataset](#1-download-the-pancreas-dataset)
 2. [Re-run Space Ranger to get the BAM](#2-re-run-space-ranger-to-get-the-bam)
 3. [Run the pipeline](#3-run-the-pipeline)
 4. [Results: the Parquet files](#4-results-the-parquet-files)
+5. [Post-processing: somatic filter and clustering score](#5-post-processing-somatic-filter-and-clustering-score)
 
 ## Requirements
 
@@ -108,6 +111,9 @@ snpeff: "GRCh38.86"
 # freebayes thresholds
 min_dp: 10   # --min-coverage
 min_ao: 3    # --min-alternate-count
+
+# post-processing: keep variants absent from dbSNP common with DP > somatic_min_dp
+somatic_min_dp: 40
 ```
 
 Run:
@@ -153,3 +159,48 @@ The pipeline produces 24 files, `data/pancreas.{chr}.spatial_variant.parquet`
 | `y` | int | Second index of the barcode = `array_col` of the 2 µm grid (0–3349) |
 | `umi` | str | UMI of the read (`UB` tag) |
 
+
+## 5. Post-processing: somatic filter and clustering score
+
+The last rule of the pipeline (`post_process`, script
+`workflow/scripts/post_process.py`) reads the 24 tables above and writes two
+files.
+
+**`data/pancreas.somatic.parquet`**: the somatic-like variants. No matched
+normal tissue is available, so two filters are used as a proxy: the variant is
+absent from dbSNP common (`rsid` is `.`) and its depth is above
+`somatic_min_dp` (`dp > 40`). The columns are the same as in section 4.
+
+**`data/pancreas.gyration.parquet`**: one row per somatic-like variant, sorted
+from the most to the least spatially clustered. For a variant *V* carried by
+*N* distinct spots at positions *c<sub>i</sub>* with centroid *c̄*, the radius
+of gyration is
+
+    R(V) = sqrt( 1/N · Σ ‖c_i − c̄‖² )
+
+and the score is `s(V) = R(V) / R_all`, where `R_all` is the radius of gyration
+of all spots carrying any variant (before filtering). `s` is near 1 for a
+variant spread like the section and tends to 0 for a concentrated one.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `chr`, `pos`, `ref`, `alt` | | Variant, as in section 4 |
+| `gene`, `effect`, `impact`, `hgvs_c`, `hgvs_p` | str | snpEff annotation, as in section 4 |
+| `dp`, `ao`, `af` | | Pseudo-bulk depth, alternate count and allele fraction |
+| `n_spots` | int | Number of distinct 2 µm spots carrying the variant (*N*) |
+| `x_mean`, `y_mean` | float | Centroid of these spots, in 2 µm grid units |
+| `radius` | float | Radius of gyration *R(V)*, in 2 µm grid units |
+| `n_molecules` | int | Number of distinct molecules (barcode + UMI) carrying the variant |
+| `s` | float | Clustering score `R(V) / R_all` |
+
+A variant seen in a single spot has `s = 0`, so filter on `n_spots` before
+ranking (e.g. `n_spots >= 20`).
+
+The script can also be run on its own:
+
+```bash
+python workflow/scripts/post_process.py data/pancreas.chr*.spatial_variant.parquet \
+    --somatic data/pancreas.somatic.parquet \
+    --score data/pancreas.gyration.parquet \
+    --min-depth 40
+```
